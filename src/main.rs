@@ -39,6 +39,10 @@ fn main() {
     
     match run(input_file) {
         Ok(()) => {}
+        Err(Error::Parse(msg)) => {
+            error!("\n{}", msg);
+            exit(1)
+        }
         Err(e) => {
             error!("{:?}", e);
             exit(1)

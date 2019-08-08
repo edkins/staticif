@@ -1,7 +1,7 @@
 #[derive(Debug)]
 pub enum Error {
     IO(std::io::Error),
-    Parse(String,String)
+    Parse(String)
 }
 
 impl From<std::io::Error> for Error {
