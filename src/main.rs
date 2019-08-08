@@ -15,7 +15,7 @@ use crate::parse::parse_file;
 fn run(input_file: &str) -> Result<(),Error> {
     let input_string = read_to_string(&input_file)?;
     let m = parse_file(&input_string)?;
-    warn!("{:?}", m);
+    warn!("{:#?}", m);
     Ok(())
 }
 

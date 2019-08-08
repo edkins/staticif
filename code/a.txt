@@ -1,5 +1,10 @@
-struct blah {
-	a: i64,
+struct Blah {
+	a: i32,
 	b: i64,
 }
-fn foo
+fn main() {
+	let x = Blah{a:0, b:0};
+	for f in blah::fields() {
+		f(x) = 4;
+	}
+}

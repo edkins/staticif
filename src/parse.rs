@@ -6,11 +6,37 @@ use nom::combinator::{all_consuming,map};
 use nom::error::ErrorKind;
 use nom::multi::many0;
 
+use num_bigint::BigInt;
+
 use crate::error::Error;
 
 #[derive(Debug)]
+pub struct FieldInit {
+    name: String,
+    value: Expr
+}
+
+#[derive(Debug)]
+pub enum Expr {
+    Struct(Type, Vec<FieldInit>),
+    Int(BigInt),
+    Var(String),
+    TypeFunc(Type, String, Vec<Expr>),
+    Func(String, Vec<Expr>),
+}
+
+#[derive(Debug)]
+pub enum Statement {
+    Let(String, Expr),
+    For(String, Expr, Vec<Statement>),
+    Assign(Expr, Expr),
+}
+
+#[derive(Debug)]
 pub struct Func {
-    name: String
+    name: String,
+    args: Vec<Arg>,
+    body: Vec<Statement>
 }
 
 type Type = String;
@@ -20,6 +46,8 @@ pub struct Field {
     name: String,
     typ: Type
 }
+
+type Arg = Field;
 
 #[derive(Debug)]
 pub struct Struct {
@@ -55,8 +83,12 @@ fn is_ascii_alpha_underscore(ch: char) -> bool {
     (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_'
 }
 
+fn is_digit(ch: char) -> bool {
+    ch >= '0' && ch <= '9'
+}
+
 fn is_ascii_alphanum_underscore(ch: char) -> bool {
-    is_ascii_alpha_underscore(ch) || (ch >= '0' && ch <= '9')
+    is_ascii_alpha_underscore(ch) || is_digit(ch)
 }
 
 fn is_closing_bracket(ch: char) -> bool {
@@ -111,10 +143,10 @@ fn name_inner(i: &str) -> IResult<&str, &str> {
 }
 
 // Consume a valid name followed by whitespace.
-fn name(i: &str) -> IResult<&str, &str> {
+fn name(i: &str) -> IResult<&str, String> {
     let (i, w) = name_inner(i)?;
     let (i, _) = whitespace(i)?;
-    Ok((i, w))
+    Ok((i, w.to_string()))
 }
 
 // Consume a particular symbol and any following whitespace
@@ -144,11 +176,18 @@ fn separator<'a,'b>(s: &'a str, i: &'b str) -> IResult<&'b str,()> {
     }
 }
 
+// Consumes a nonnegative integer and any following whitespace
+fn bigint(i: &str) -> IResult<&str, BigInt> {
+    let (i,num) = take_while1(is_digit)(i)?;
+    let (i,_) = whitespace(i)?;
+    Ok((i, num.parse().unwrap()))
+}
+
 //////////////////////////////////
 
 fn typ(i: &str) -> IResult<&str, Type> {
     let (i,t) = name(i)?;
-    Ok((i,t.to_string()))
+    Ok((i,t))
 }
 
 fn field(i: &str) -> IResult<&str, Field> {
@@ -156,15 +195,23 @@ fn field(i: &str) -> IResult<&str, Field> {
     let (i,_) = sym(":",i)?;
     let (i,typ) = typ(i)?;
     let (i,_) = separator(",",i)?;
-    Ok((i, Field{name:name.to_string(), typ:typ}))
+    Ok((i, Field{name:name, typ:typ}))
 }
 
 // Consume a function definition
 fn func(i: &str) -> IResult<&str, Func> {
     let (i,_) = word("fn",i)?;
     let (i,name) = name(i)?;
+    let (i,_) = sym("(",i)?;
+    let (i,args) = many0(field)(i)?;
+    let (i,_) = sym(")",i).unrec()?;
+    let (i,_) = sym("{",i)?;
+    let (i,body) = many0(statement)(i)?;
+    let (i,_) = sym("}",i).unrec()?;
     Ok((i,Func{
-        name:name.to_string()
+        name:name,
+        args:args,
+        body:body
     }))
 }
 
@@ -176,7 +223,7 @@ fn structure(i: &str) -> IResult<&str, Struct> {
     let (i,fields) = many0(field)(i)?;
     let (i,_) = sym("}",i).unrec()?;
     Ok((i,Struct{
-        name:name.to_string(),
+        name:name,
         fields: fields
     }))
 }
@@ -185,6 +232,92 @@ fn top_level_item(i: &str) -> IResult<&str, Item> {
     alt((
         map(func,Item::Func),
         map(structure,Item::Struct)
+    ))(i)
+}
+
+fn field_init(i: &str) -> IResult<&str, FieldInit> {
+    let (i,name) = name(i)?;
+    let (i,_) = sym(":",i)?;
+    let (i,value) = expr(i)?;
+    let (i,_) = separator(",",i)?;
+    Ok((i,FieldInit{name:name,value:value}))
+}
+
+fn struct_expr(i: &str) -> IResult<&str, Expr> {
+    let (i,typ) = typ(i)?;
+    let (i,_) = sym("{",i)?;
+    let (i,field_inits) = many0(field_init)(i)?;
+    let (i,_) = sym("}",i).unrec()?;
+    Ok((i,Expr::Struct(typ,field_inits)))
+}
+
+fn type_func_expr(i: &str) -> IResult<&str, Expr> {
+    let (i,typ) = typ(i)?;
+    let (i,_) = sym("::",i)?;
+    let (i,name) = name(i)?;
+    let (i,_) = sym("(",i)?;
+    let (i,args) = many0(arg_init)(i)?;
+    let (i,_) = sym(")",i).unrec()?;
+    Ok((i,Expr::TypeFunc(typ,name,args)))
+}
+
+fn func_expr(i: &str) -> IResult<&str, Expr> {
+    let (i,name) = name(i)?;
+    let (i,_) = sym("(",i)?;
+    let (i,args) = many0(arg_init)(i)?;
+    let (i,_) = sym(")",i).unrec()?;
+    Ok((i,Expr::Func(name,args)))
+}
+
+fn expr(i: &str) -> IResult<&str, Expr> {
+    alt((
+        struct_expr,
+        type_func_expr,
+        func_expr,
+        map(name,Expr::Var),
+        map(bigint,Expr::Int)
+    ))(i)
+}
+
+fn arg_init(i: &str) -> IResult<&str, Expr> {
+    let (i,expr) = expr(i)?;
+    let (i,_) = separator(",",i)?;
+    Ok((i,expr))
+}
+
+fn let_statement(i: &str) -> IResult<&str, Statement> {
+    let (i,_) = word("let",i)?;
+    let (i,name) = name(i)?;
+    let (i,_) = sym("=",i)?;
+    let (i,expr) = expr(i)?;
+    let (i,_) = sym(";",i)?;
+    Ok((i,Statement::Let(name,expr)))
+}
+
+fn for_statement(i: &str) -> IResult<&str, Statement> {
+    let (i,_) = word("for",i)?;
+    let (i,name) = name(i)?;
+    let (i,_) = word("in",i)?;
+    let (i,expr) = expr(i)?;
+    let (i,_) = sym("{",i)?;
+    let (i,body) = many0(statement)(i)?;
+    let (i,_) = sym("}",i).unrec()?;
+    Ok((i,Statement::For(name,expr,body)))
+}
+
+fn assign_statement(i: &str) -> IResult<&str, Statement> {
+    let (i,lhs) = expr(i)?;
+    let (i,_) = sym("=",i)?;
+    let (i,rhs) = expr(i)?;
+    let (i,_) = sym(";",i)?;
+    Ok((i,Statement::Assign(lhs,rhs)))
+}
+
+fn statement(i: &str) -> IResult<&str, Statement> {
+    alt((
+        let_statement,
+        for_statement,
+        assign_statement
     ))(i)
 }
 
