@@ -3,19 +3,28 @@ extern crate clap;
 #[macro_use]
 extern crate log;
 
+mod check;
 mod error;
 mod parse;
 
 use std::fs::read_to_string;
 use std::process::exit;
 
+use crate::check::check;
 use crate::error::Error;
 use crate::parse::parse_file;
 
-fn run(input_file: &str) -> Result<(),Error> {
-    let input_string = read_to_string(&input_file)?;
+fn process(input_string: &str) -> Result<(),Error> {
     let m = parse_file(&input_string)?;
     warn!("{:#?}", m);
+    check(&m)?;
+    warn!("OK");
+    Ok(())
+}
+
+fn run(input_file: &str) -> Result<(),Error> {
+    let input_string = read_to_string(&input_file)?;
+    process(&input_string).map_err(|e| e.to_msg(&input_string))?;
     Ok(())
 }
 
@@ -39,7 +48,7 @@ fn main() {
     
     match run(input_file) {
         Ok(()) => {}
-        Err(Error::Parse(msg)) => {
+        Err(Error::Msg(msg)) => {
             error!("\n{}", msg);
             exit(1)
         }

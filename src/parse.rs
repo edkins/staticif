@@ -23,7 +23,7 @@ pub struct FieldInit {
 }
 
 #[derive(Debug,Clone)]
-pub enum Expr {
+pub enum EE {
     Struct(Type, Vec<FieldInit>),
     Int(BigInt),
     Var(String),
@@ -33,22 +33,59 @@ pub enum Expr {
     Method(Box<Expr>, String, Vec<Expr>),
 }
 
+impl EE {
+    fn at(self, pos:Position) -> Expr {
+        Expr{
+            pos: pos,
+            expr: self
+        }
+    }
+}
+
+pub type Position = usize;
+
+fn pos(i:&str) -> Position {
+    i.len()
+}
+
 #[derive(Debug,Clone)]
-pub enum Statement {
+pub struct Expr {
+    pub pos: Position,
+    pub expr: EE
+}
+
+#[derive(Debug,Clone)]
+pub enum SE {
     Let(Mutability, String, Expr),
     For(String, Expr, Vec<Statement>),
     Assign(Expr, Expr),
     Expr(Expr),
 }
 
+impl SE {
+    fn at(self, pos:Position) -> Statement {
+        Statement{
+            pos:pos,
+            statement: self
+        }
+    }
+}
+
+#[derive(Debug,Clone)]
+pub struct Statement {
+    pos: Position,
+    statement: SE
+}
+
 #[derive(Debug,Clone)]
 pub struct Func {
+    pos: Position,
     name: String,
     args: Vec<Arg>,
     body: Vec<Statement>
 }
 
-type Type = String;
+pub type Type = String;
 
 #[derive(Debug,Clone)]
 pub struct Field {
@@ -60,6 +97,7 @@ type Arg = Field;
 
 #[derive(Debug,Clone)]
 pub struct Struct {
+    pos: Position,
     name: String,
     fields: Vec<Field>
 }
@@ -70,7 +108,7 @@ pub enum Item {
     Struct(Struct)
 }
 
-type Module = Vec<Item>;
+pub type Module = Vec<Item>;
 
 ///////////////////////////////////////////
 // Combinators and modifiers
@@ -200,29 +238,44 @@ fn bigint(i: &str) -> IResult<&str, BigInt> {
 // Atomic expression parsers and their helpers
 
 fn struct_expr(i: &str) -> IResult<&str, Expr> {
+    let p = pos(i);
     let (i,typ) = typ(i)?;
     let (i,_) = sym("{",i)?;
     let (i,field_inits) = many0(field_init)(i)?;
     let (i,_) = sym("}",i).unrec()?;
-    Ok((i,Expr::Struct(typ,field_inits)))
+    Ok((i,EE::Struct(typ,field_inits).at(p)))
 }
 
 fn type_func_expr(i: &str) -> IResult<&str, Expr> {
+    let p = pos(i);
     let (i,typ) = typ(i)?;
     let (i,_) = sym("::",i)?;
     let (i,name) = name(i)?;
     let (i,_) = sym("(",i)?;
     let (i,args) = many0(arg_init)(i)?;
     let (i,_) = sym(")",i).unrec()?;
-    Ok((i,Expr::TypeFunc(typ,name,args)))
+    Ok((i,EE::TypeFunc(typ,name,args).at(p)))
 }
 
 fn func_expr(i: &str) -> IResult<&str, Expr> {
+    let p = pos(i);
     let (i,name) = name(i)?;
     let (i,_) = sym("(",i)?;
     let (i,args) = many0(arg_init)(i)?;
     let (i,_) = sym(")",i).unrec()?;
-    Ok((i,Expr::Func(name,args)))
+    Ok((i,EE::Func(name,args).at(p)))
+}
+
+fn var_expr(i: &str) -> IResult<&str, Expr> {
+    let p = pos(i);
+    let (i,name) = name(i)?;
+    Ok((i,EE::Var(name).at(p)))
+}
+
+fn int_expr(i: &str) -> IResult<&str, Expr> {
+    let p = pos(i);
+    let (i,n) = bigint(i)?;
+    Ok((i,EE::Int(n).at(p)))
 }
 
 fn expr_atom(i: &str) -> IResult<&str, Expr> {
@@ -230,8 +283,8 @@ fn expr_atom(i: &str) -> IResult<&str, Expr> {
         struct_expr,
         type_func_expr,
         func_expr,
-        map(name,Expr::Var),
-        map(bigint,Expr::Int)
+        var_expr,
+        int_expr
     ))(i)
 }
 
@@ -244,23 +297,26 @@ fn expr_dot_methods(i: &str) -> IResult<&str, Expr> {
         just_dot_method,
         e0,
         |e, (name,args)| {
-            Expr::Method(Box::new(e), name, args)
+            let p = e.pos;
+            EE::Method(Box::new(e), name, args).at(p)
         }
     )(i)?;
     Ok((i,e1))
 }
 
 fn ref_mut_expr(i: &str) -> IResult<&str, Expr> {
+    let p = pos(i);
     let (i,_) = sym("&",i)?;
     let (i,_) = word("mut",i)?;
     let (i,e) = expr(i)?;
-    Ok((i,Expr::Ref(Mutability::Mut, Box::new(e))))
+    Ok((i,EE::Ref(Mutability::Mut, Box::new(e)).at(p)))
 }
 
 fn ref_expr(i: &str) -> IResult<&str, Expr> {
+    let p = pos(i);
     let (i,_) = sym("&",i)?;
     let (i,e) = expr(i)?;
-    Ok((i,Expr::Ref(Mutability::Const, Box::new(e))))
+    Ok((i,EE::Ref(Mutability::Const, Box::new(e)).at(p)))
 }
 
 fn expr(i: &str) -> IResult<&str, Expr> {
@@ -307,6 +363,7 @@ fn field(i: &str) -> IResult<&str, Field> {
 
 // Consume a function definition
 fn func(i: &str) -> IResult<&str, Func> {
+    let p = pos(i);
     let (i,_) = word("fn",i)?;
     let (i,name) = name(i)?;
     let (i,_) = sym("(",i)?;
@@ -316,6 +373,7 @@ fn func(i: &str) -> IResult<&str, Func> {
     let (i,body) = many0(statement)(i)?;
     let (i,_) = sym("}",i).unrec()?;
     Ok((i,Func{
+        pos:p,
         name:name,
         args:args,
         body:body
@@ -324,12 +382,14 @@ fn func(i: &str) -> IResult<&str, Func> {
 
 // Consume a struct definition
 fn structure(i: &str) -> IResult<&str, Struct> {
+    let p = pos(i);
     let (i,_) = word("struct",i)?;
     let (i,name) = name(i)?;
     let (i,_) = sym("{",i)?;
     let (i,fields) = many0(field)(i)?;
     let (i,_) = sym("}",i).unrec()?;
     Ok((i,Struct{
+        pos:p,
         name:name,
         fields: fields
     }))
@@ -351,25 +411,28 @@ fn field_init(i: &str) -> IResult<&str, FieldInit> {
 }
 
 fn let_mut_statement(i: &str) -> IResult<&str, Statement> {
+    let p = pos(i);
     let (i,_) = word("let",i)?;
     let (i,_) = word("mut",i)?;
     let (i,name) = name(i)?;
     let (i,_) = sym("=",i)?;
     let (i,expr) = expr(i)?;
     let (i,_) = sym(";",i)?;
-    Ok((i,Statement::Let(Mutability::Mut,name,expr)))
+    Ok((i,SE::Let(Mutability::Mut,name,expr).at(p)))
 }
 
 fn let_statement(i: &str) -> IResult<&str, Statement> {
+    let p = pos(i);
     let (i,_) = word("let",i)?;
     let (i,name) = name(i)?;
     let (i,_) = sym("=",i)?;
     let (i,expr) = expr(i)?;
     let (i,_) = sym(";",i)?;
-    Ok((i,Statement::Let(Mutability::Const,name,expr)))
+    Ok((i,SE::Let(Mutability::Const,name,expr).at(p)))
 }
 
 fn for_statement(i: &str) -> IResult<&str, Statement> {
+    let p = pos(i);
     let (i,_) = word("for",i)?;
     let (i,name) = name(i)?;
     let (i,_) = word("in",i)?;
@@ -377,21 +440,23 @@ fn for_statement(i: &str) -> IResult<&str, Statement> {
     let (i,_) = sym("{",i)?;
     let (i,body) = many0(statement)(i)?;
     let (i,_) = sym("}",i).unrec()?;
-    Ok((i,Statement::For(name,expr,body)))
+    Ok((i,SE::For(name,expr,body).at(p)))
 }
 
 fn assign_statement(i: &str) -> IResult<&str, Statement> {
+    let p = pos(i);
     let (i,lhs) = expr(i)?;
     let (i,_) = sym("=",i)?;
     let (i,rhs) = expr(i)?;
     let (i,_) = sym(";",i)?;
-    Ok((i,Statement::Assign(lhs,rhs)))
+    Ok((i,SE::Assign(lhs,rhs).at(p)))
 }
 
 fn expr_statement(i: &str) -> IResult<&str, Statement> {
     let (i,e) = expr(i)?;
     let (i,_) = sym(";",i)?;
-    Ok((i,Statement::Expr(e)))
+    let p = e.pos;
+    Ok((i,SE::Expr(e).at(p)))
 }
 
 fn statement(i: &str) -> IResult<&str, Statement> {
@@ -413,23 +478,18 @@ fn module(i: &str) -> IResult<&str, Module> {
 ///////////////////////////////////////
 // Main error handling
 
-fn parse_error<T>(reason: &str, input_string: &str, i: &str) -> Result<T, Error> {
-    let error = format!("*** {} ***\n{}!!!ERROR!!!{}\n", reason, &input_string[..input_string.len()-i.len()], i);
-    Err(Error::Parse(error))
-}
-
 pub fn parse_file(input_string: &str) -> Result<Module, Error> {
     match all_consuming(module)(input_string) {
         Ok((i,m)) => {
             if i.len() == 0 {
                 Ok(m)
             } else {
-                parse_error("remaining", input_string, i)
+                Err(Error::At("remaining".to_string(), pos(i)))
             }
         }
-        Err(nom::Err::Incomplete(_)) => parse_error("incomplete",input_string,""),
-        Err(nom::Err::Error((i,k))) => parse_error(&format!("{:?}", k),input_string,i),
-        Err(nom::Err::Failure((i,k))) => parse_error(&format!("{:?}", k),input_string,i)
+        Err(nom::Err::Incomplete(_)) => Err(Error::At("incomplete".to_string(), 0)),
+        Err(nom::Err::Error((i,k))) => Err(Error::At(format!("{:?}", k), pos(i))),
+        Err(nom::Err::Failure((i,k))) => Err(Error::At(format!("{:?}", k), pos(i)))
     }
 }
 
