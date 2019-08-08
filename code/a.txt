@@ -3,8 +3,8 @@ struct Blah {
 	b: i64,
 }
 fn main() {
-	let x = Blah{a:0, b:0};
-	for f in blah::fields() {
-		f(x) = 4;
+	let mut x = Blah{a:0, b:0};
+	for f in Blah::fields() {
+		f.set(&mut x, 4);
 	}
 }

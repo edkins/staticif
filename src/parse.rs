@@ -4,35 +4,44 @@ use nom::bytes::complete::{tag,take_while1};
 use nom::character::complete::multispace0;
 use nom::combinator::{all_consuming,map};
 use nom::error::ErrorKind;
-use nom::multi::many0;
+use nom::multi::{many0,fold_many0};
 
 use num_bigint::BigInt;
 
 use crate::error::Error;
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
+pub enum Mutability {
+    Const,
+    Mut
+}
+
+#[derive(Debug,Clone)]
 pub struct FieldInit {
     name: String,
     value: Expr
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub enum Expr {
     Struct(Type, Vec<FieldInit>),
     Int(BigInt),
     Var(String),
+    Ref(Mutability, Box<Expr>),
     TypeFunc(Type, String, Vec<Expr>),
     Func(String, Vec<Expr>),
+    Method(Box<Expr>, String, Vec<Expr>),
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub enum Statement {
-    Let(String, Expr),
+    Let(Mutability, String, Expr),
     For(String, Expr, Vec<Statement>),
     Assign(Expr, Expr),
+    Expr(Expr),
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct Func {
     name: String,
     args: Vec<Arg>,
@@ -41,7 +50,7 @@ pub struct Func {
 
 type Type = String;
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct Field {
     name: String,
     typ: Type
@@ -49,13 +58,13 @@ pub struct Field {
 
 type Arg = Field;
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct Struct {
     name: String,
     fields: Vec<Field>
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub enum Item {
     Func(Func),
     Struct(Struct)
@@ -64,6 +73,7 @@ pub enum Item {
 type Module = Vec<Item>;
 
 ///////////////////////////////////////////
+// Combinators and modifiers
 
 trait MakeUnrecoverable {
     fn unrec(self) -> Self;
@@ -79,6 +89,8 @@ impl<'a, T> MakeUnrecoverable for IResult<&'a str, T> {
 }
 
 ///////////////////////////////////////////
+// Plain old functions
+
 fn is_ascii_alpha_underscore(ch: char) -> bool {
     (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_'
 }
@@ -104,6 +116,7 @@ fn first_char(x: &str) -> char {
 }
 
 ///////////////////////////////////////////
+// Low-level parsers
 
 fn whitespace(i: &str) -> IResult<&str, ()> {
     let (i, _) = multispace0(i)?;
@@ -184,6 +197,100 @@ fn bigint(i: &str) -> IResult<&str, BigInt> {
 }
 
 //////////////////////////////////
+// Atomic expression parsers and their helpers
+
+fn struct_expr(i: &str) -> IResult<&str, Expr> {
+    let (i,typ) = typ(i)?;
+    let (i,_) = sym("{",i)?;
+    let (i,field_inits) = many0(field_init)(i)?;
+    let (i,_) = sym("}",i).unrec()?;
+    Ok((i,Expr::Struct(typ,field_inits)))
+}
+
+fn type_func_expr(i: &str) -> IResult<&str, Expr> {
+    let (i,typ) = typ(i)?;
+    let (i,_) = sym("::",i)?;
+    let (i,name) = name(i)?;
+    let (i,_) = sym("(",i)?;
+    let (i,args) = many0(arg_init)(i)?;
+    let (i,_) = sym(")",i).unrec()?;
+    Ok((i,Expr::TypeFunc(typ,name,args)))
+}
+
+fn func_expr(i: &str) -> IResult<&str, Expr> {
+    let (i,name) = name(i)?;
+    let (i,_) = sym("(",i)?;
+    let (i,args) = many0(arg_init)(i)?;
+    let (i,_) = sym(")",i).unrec()?;
+    Ok((i,Expr::Func(name,args)))
+}
+
+fn expr_atom(i: &str) -> IResult<&str, Expr> {
+    alt((
+        struct_expr,
+        type_func_expr,
+        func_expr,
+        map(name,Expr::Var),
+        map(bigint,Expr::Int)
+    ))(i)
+}
+
+//////////////////////////////////
+// Expression parsers
+
+fn expr_dot_methods(i: &str) -> IResult<&str, Expr> {
+    let (i, e0) = expr_atom(i)?;
+    let (i, e1) = fold_many0(
+        just_dot_method,
+        e0,
+        |e, (name,args)| {
+            Expr::Method(Box::new(e), name, args)
+        }
+    )(i)?;
+    Ok((i,e1))
+}
+
+fn ref_mut_expr(i: &str) -> IResult<&str, Expr> {
+    let (i,_) = sym("&",i)?;
+    let (i,_) = word("mut",i)?;
+    let (i,e) = expr(i)?;
+    Ok((i,Expr::Ref(Mutability::Mut, Box::new(e))))
+}
+
+fn ref_expr(i: &str) -> IResult<&str, Expr> {
+    let (i,_) = sym("&",i)?;
+    let (i,e) = expr(i)?;
+    Ok((i,Expr::Ref(Mutability::Const, Box::new(e))))
+}
+
+fn expr(i: &str) -> IResult<&str, Expr> {
+    alt((
+        ref_mut_expr,
+        ref_expr,
+        expr_dot_methods
+    ))(i)
+}
+
+//////////////////////////////////
+// Helpers for expression parsers
+
+fn arg_init(i: &str) -> IResult<&str, Expr> {
+    let (i,expr) = expr(i)?;
+    let (i,_) = separator(",",i)?;
+    Ok((i,expr))
+}
+
+fn just_dot_method(i: &str) -> IResult<&str, (String,Vec<Expr>)> {
+    let (i, _) = sym(".",i)?;
+    let (i, name) = name(i)?;
+    let (i, _) = sym("(",i)?;
+    let (i,args) = many0(arg_init)(i)?;
+    let (i,_) = sym(")",i).unrec()?;
+    Ok((i,(name,args)))
+}
+
+//////////////////////////////////
+// High level parsers
 
 fn typ(i: &str) -> IResult<&str, Type> {
     let (i,t) = name(i)?;
@@ -243,46 +350,14 @@ fn field_init(i: &str) -> IResult<&str, FieldInit> {
     Ok((i,FieldInit{name:name,value:value}))
 }
 
-fn struct_expr(i: &str) -> IResult<&str, Expr> {
-    let (i,typ) = typ(i)?;
-    let (i,_) = sym("{",i)?;
-    let (i,field_inits) = many0(field_init)(i)?;
-    let (i,_) = sym("}",i).unrec()?;
-    Ok((i,Expr::Struct(typ,field_inits)))
-}
-
-fn type_func_expr(i: &str) -> IResult<&str, Expr> {
-    let (i,typ) = typ(i)?;
-    let (i,_) = sym("::",i)?;
+fn let_mut_statement(i: &str) -> IResult<&str, Statement> {
+    let (i,_) = word("let",i)?;
+    let (i,_) = word("mut",i)?;
     let (i,name) = name(i)?;
-    let (i,_) = sym("(",i)?;
-    let (i,args) = many0(arg_init)(i)?;
-    let (i,_) = sym(")",i).unrec()?;
-    Ok((i,Expr::TypeFunc(typ,name,args)))
-}
-
-fn func_expr(i: &str) -> IResult<&str, Expr> {
-    let (i,name) = name(i)?;
-    let (i,_) = sym("(",i)?;
-    let (i,args) = many0(arg_init)(i)?;
-    let (i,_) = sym(")",i).unrec()?;
-    Ok((i,Expr::Func(name,args)))
-}
-
-fn expr(i: &str) -> IResult<&str, Expr> {
-    alt((
-        struct_expr,
-        type_func_expr,
-        func_expr,
-        map(name,Expr::Var),
-        map(bigint,Expr::Int)
-    ))(i)
-}
-
-fn arg_init(i: &str) -> IResult<&str, Expr> {
+    let (i,_) = sym("=",i)?;
     let (i,expr) = expr(i)?;
-    let (i,_) = separator(",",i)?;
-    Ok((i,expr))
+    let (i,_) = sym(";",i)?;
+    Ok((i,Statement::Let(Mutability::Mut,name,expr)))
 }
 
 fn let_statement(i: &str) -> IResult<&str, Statement> {
@@ -291,7 +366,7 @@ fn let_statement(i: &str) -> IResult<&str, Statement> {
     let (i,_) = sym("=",i)?;
     let (i,expr) = expr(i)?;
     let (i,_) = sym(";",i)?;
-    Ok((i,Statement::Let(name,expr)))
+    Ok((i,Statement::Let(Mutability::Const,name,expr)))
 }
 
 fn for_statement(i: &str) -> IResult<&str, Statement> {
@@ -313,11 +388,19 @@ fn assign_statement(i: &str) -> IResult<&str, Statement> {
     Ok((i,Statement::Assign(lhs,rhs)))
 }
 
+fn expr_statement(i: &str) -> IResult<&str, Statement> {
+    let (i,e) = expr(i)?;
+    let (i,_) = sym(";",i)?;
+    Ok((i,Statement::Expr(e)))
+}
+
 fn statement(i: &str) -> IResult<&str, Statement> {
     alt((
+        let_mut_statement,
         let_statement,
         for_statement,
-        assign_statement
+        assign_statement,
+        expr_statement
     ))(i)
 }
 
@@ -328,6 +411,7 @@ fn module(i: &str) -> IResult<&str, Module> {
 }
 
 ///////////////////////////////////////
+// Main error handling
 
 fn parse_error<T>(reason: &str, input_string: &str, i: &str) -> Result<T, Error> {
     let error = format!("*** {} ***\n{}!!!ERROR!!!{}\n", reason, &input_string[..input_string.len()-i.len()], i);
